@@ -1,0 +1,275 @@
+// MIT License
+//
+// Copyright (c) 2022 Spiral Scout
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+package logger
+
+import (
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"gopkg.in/natefinch/lumberjack.v2"
+	"os"
+	"strings"
+)
+
+// Mode represents available logger modes
+type Mode string
+
+const (
+	none        Mode = "none"
+	off         Mode = "off"
+	production  Mode = "production"
+	development Mode = "development"
+	raw         Mode = "raw"
+)
+
+// ChannelConfig configures loggers per channel.
+type ChannelConfig struct {
+	// Dedicated channels per logger. By default logger allocated via named logger.
+	Channels map[string]*Config `mapstructure:"channels"`
+}
+
+// FileLoggerConfig structure represents configuration for the file logger
+type FileLoggerConfig struct {
+	// Filename is the file to write logs to.  Backup log files will be retained
+	// in the same directory.  It uses <processname>-lumberjack.log in
+	// os.TempDir() if empty.
+	LogOutput string `mapstructure:"log_output"`
+
+	// MaxSize is the maximum size in megabytes of the log file before it gets
+	// rotated. It defaults to 100 megabytes.
+	MaxSize int `mapstructure:"max_size"`
+
+	// MaxAge is the maximum number of days to retain old log files based on the
+	// timestamp encoded in their filename.  Note that a day is defined as 24
+	// hours and may not exactly correspond to calendar days due to daylight
+	// savings, leap seconds, etc. The default is not to remove old log files
+	// based on age.
+	MaxAge int `mapstructure:"max_age"`
+
+	// MaxBackups is the maximum number of old log files to retain.  The default
+	// is to retain all old log files (though MaxAge may still cause them to get
+	// deleted.)
+	MaxBackups int `mapstructure:"max_backups"`
+
+	// Compress determines if the rotated log files should be compressed
+	// using gzip. The default is not to perform compression.
+	Compress bool `mapstructure:"compress"`
+}
+
+func (fl *FileLoggerConfig) InitDefaults() *FileLoggerConfig {
+	if fl.LogOutput == "" {
+		fl.LogOutput = os.TempDir()
+	}
+
+	if fl.MaxSize == 0 {
+		fl.MaxSize = 100
+	}
+
+	if fl.MaxAge == 0 {
+		fl.MaxAge = 24
+	}
+
+	if fl.MaxBackups == 0 {
+		fl.MaxBackups = 10
+	}
+
+	return fl
+}
+
+type Config struct {
+	// Mode configures logger based on some default template (development, production, off).
+	Mode Mode `mapstructure:"mode"`
+
+	// Level is the minimum enabled logging level.
+	Level string `mapstructure:"level"`
+
+	// Logger line ending. Default: "\n" for the all modes except production
+	LineEnding string `mapstructure:"line_ending"`
+
+	// Encoding sets the logger's encoding. InitDefault values are "json" and
+	// "console", as well as any third-party encodings registered via
+	// RegisterEncoder.
+	Encoding string `mapstructure:"encoding"`
+
+	// Output is a list of URLs or file paths to write logging output to.
+	// See Open for details.
+	Output []string `mapstructure:"output"`
+
+	// ErrorOutput is a list of URLs to write internal logger errors to.
+	// The default is standard error.
+	//
+	// Note that this setting only affects internal errors; for sample code that
+	// sends error-level logs to a different location from info- and debug-level
+	// logs, see the package-level AdvancedConfiguration example.
+	ErrorOutput []string `mapstructure:"error_output"`
+
+	// File logger options
+	FileLogger *FileLoggerConfig `mapstructure:"file_logger_options"`
+}
+
+// BuildLogger converts config into Zap configuration.
+func (cfg *Config) BuildLogger() (*zap.Logger, error) {
+	var zCfg zap.Config
+	switch Mode(strings.ToLower(string(cfg.Mode))) {
+	case off, none:
+		return zap.NewNop(), nil
+	case production:
+		zCfg = zap.Config{
+			Level:       zap.NewAtomicLevelAt(zap.InfoLevel),
+			Development: false,
+			Encoding:    "json",
+			EncoderConfig: zapcore.EncoderConfig{
+				TimeKey:        "ts",
+				LevelKey:       "level",
+				NameKey:        "logger",
+				CallerKey:      zapcore.OmitKey,
+				FunctionKey:    zapcore.OmitKey,
+				MessageKey:     "msg",
+				StacktraceKey:  zapcore.OmitKey,
+				LineEnding:     cfg.LineEnding,
+				EncodeLevel:    zapcore.LowercaseLevelEncoder,
+				EncodeTime:     zapcore.EpochTimeEncoder,
+				EncodeDuration: zapcore.SecondsDurationEncoder,
+				EncodeCaller:   zapcore.ShortCallerEncoder,
+			},
+			OutputPaths:      []string{"stderr"},
+			ErrorOutputPaths: []string{"stderr"},
+		}
+	case development:
+		zCfg = zap.Config{
+			Level:       zap.NewAtomicLevelAt(zap.DebugLevel),
+			Development: true,
+			Encoding:    "console",
+			EncoderConfig: zapcore.EncoderConfig{
+				TimeKey:        "ts",
+				LevelKey:       "level",
+				NameKey:        "logger",
+				CallerKey:      zapcore.OmitKey,
+				FunctionKey:    zapcore.OmitKey,
+				MessageKey:     "msg",
+				StacktraceKey:  zapcore.OmitKey,
+				LineEnding:     cfg.LineEnding,
+				EncodeLevel:    ColoredLevelEncoder,
+				EncodeName:     ColoredNameEncoder,
+				EncodeTime:     zapcore.ISO8601TimeEncoder,
+				EncodeDuration: zapcore.StringDurationEncoder,
+				EncodeCaller:   zapcore.ShortCallerEncoder,
+			},
+			OutputPaths:      []string{"stderr"},
+			ErrorOutputPaths: []string{"stderr"},
+		}
+	case raw:
+		zCfg = zap.Config{
+			Level:    zap.NewAtomicLevelAt(zap.InfoLevel),
+			Encoding: "console",
+			EncoderConfig: zapcore.EncoderConfig{
+				MessageKey: "message",
+				LineEnding: cfg.LineEnding,
+				EncodeTime: zapcore.EpochTimeEncoder,
+			},
+			OutputPaths:      []string{"stderr"},
+			ErrorOutputPaths: []string{"stderr"},
+		}
+	default:
+		zCfg = zap.Config{
+			Level:    zap.NewAtomicLevelAt(zap.DebugLevel),
+			Encoding: "console",
+			EncoderConfig: zapcore.EncoderConfig{
+				TimeKey:        "T",
+				LevelKey:       "L",
+				NameKey:        "N",
+				CallerKey:      zapcore.OmitKey,
+				FunctionKey:    zapcore.OmitKey,
+				MessageKey:     "M",
+				StacktraceKey:  zapcore.OmitKey,
+				LineEnding:     cfg.LineEnding,
+				EncodeLevel:    ColoredLevelEncoder,
+				EncodeName:     ColoredNameEncoder,
+				EncodeTime:     zapcore.ISO8601TimeEncoder,
+				EncodeDuration: zapcore.StringDurationEncoder,
+				EncodeCaller:   zapcore.ShortCallerEncoder,
+			},
+			OutputPaths:      []string{"stderr"},
+			ErrorOutputPaths: []string{"stderr"},
+		}
+	}
+
+	if cfg.Level != "" {
+		level := zap.NewAtomicLevel()
+		if err := level.UnmarshalText([]byte(cfg.Level)); err == nil {
+			zCfg.Level = level
+		}
+	}
+
+	if cfg.Encoding != "" {
+		zCfg.Encoding = cfg.Encoding
+	}
+
+	if len(cfg.Output) != 0 {
+		zCfg.OutputPaths = cfg.Output
+	}
+
+	if len(cfg.ErrorOutput) != 0 {
+		zCfg.ErrorOutputPaths = cfg.ErrorOutput
+	}
+
+	// if we also have a file logger specified in the config
+	// init it
+	// otherwise - return standard config
+	if cfg.FileLogger != nil {
+		// init absent options
+		cfg.FileLogger.InitDefaults()
+
+		w := zapcore.AddSync(
+			&lumberjack.Logger{
+				Filename:   cfg.FileLogger.LogOutput,
+				MaxSize:    cfg.FileLogger.MaxSize,
+				MaxAge:     cfg.FileLogger.MaxAge,
+				MaxBackups: cfg.FileLogger.MaxBackups,
+				Compress:   cfg.FileLogger.Compress,
+			},
+		)
+
+		core := zapcore.NewCore(
+			zapcore.NewJSONEncoder(zCfg.EncoderConfig),
+			w,
+			zCfg.Level,
+		)
+		return zap.New(core), nil
+	}
+
+	return zCfg.Build()
+}
+
+// InitDefault Initialize default logger
+func (cfg *Config) InitDefault() {
+	if cfg.Mode == "" {
+		cfg.Mode = development
+	}
+	if cfg.Level == "" {
+		cfg.Level = "debug"
+	}
+
+	if cfg.LineEnding == "" {
+		cfg.LineEnding = zapcore.DefaultLineEnding
+	}
+}
